@@ -30,7 +30,7 @@ class Agent():
             seed (int): random seed
         """
         self.state_size = state_size
-        seld.action_size = action_size
+        self.action_size = action_size
         self.seed = random.seed(seed)
         
         # define Q-Network
@@ -86,15 +86,15 @@ class Agent():
         states, actions, reward, next_states, dones = experiences
         
         # get max predicted Q values (for next states) from target model
-        Q_target_next = self.qnetwork_target(next_state).detach().max(1)[0].unsqueeze(1)
+        Q_target_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
         # compute Q targets for current states
-        Q_target = reward + (gamma * Q_targets_next * (1 - dones))
+        Q_target = reward + (gamma * Q_target_next * (1 - dones))
         
         # get expected Q values from local model
-        Q_expected  = self.qnatwork_local(states).gather(1,actions)
+        Q_expected  = self.qnetwork_local(states).gather(1,actions)
         
         # compute loss
-        loss = F.mse_loss(Q_expected, Q_targets)
+        loss = F.mse_loss(Q_expected, Q_target)
         # minimize the loss
         self.optimizer.zero_grad()
         loss.backward()
@@ -104,7 +104,7 @@ class Agent():
         self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
         
     
-    def soft_update(self, local_network, target_model, tau):
+    def soft_update(self, local_model, target_model, tau):
         """ soft update model parameters.
         theta_target = tau*theta_local + (1 - tau)*theta_target
         
@@ -115,7 +115,7 @@ class Agent():
             tau (float): interpolation parameter
         """
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
-            target_param.data.copy_(tau*local_params.data + (1. -tau)*target_param.data)
+            target_param.data.copy_(tau*local_param.data + (1. -tau)*target_param.data)
             
             
             
@@ -133,6 +133,7 @@ class ReplayBuffer:
             seed (int): random seed
         """
         self.action_size = action_size
+        self.memory = deque(maxlen=buffer_size)  
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.experience = namedtuple("Experience", field_names=['state', 'action', 'reward', 'next_state', 'done'])
