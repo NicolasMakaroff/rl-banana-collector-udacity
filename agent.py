@@ -16,6 +16,7 @@ LR = 5e-4               # learning rate
 UPDATE_EVERY = 4        # how often to update the network
 
 USE_DOUBLE_DQN = True   # whether or not to use double dqn
+USE_PRIORITIZED_REPLAY = True  # use prioritized experience replay
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -42,7 +43,10 @@ class Agent():
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(),lr=LR)
         
         # Replay memory
-        self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
+        if USE_PRIORITIZED_REPLAY:
+            self.memory = PrioritizedReplayBuffer(action_size,BUFFER_SIZE,BATCH_SIZE,seed,device, alpha=.6, beta = .4, beta_scheduler=1.)
+        else:
+            self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
         # initial time step
         self.t_step = 0
         
@@ -82,11 +86,11 @@ class Agent():
         
         Params
         ======
-            experiences (Tuple[torch.Variable]): tuple of (s, a, r, s', done) tuples
+            experiences (Tuple[torch.Variable]): tuple of (s, a, r, s', done, w) tuples
             gamma (float): discount factor
         """
         
-        states, actions, reward, next_states, dones = experiences
+        states, actions, reward, next_states, dones, w = experiences
         
         with torch.no_grad():
             if USE_DOUBLE_DQN :
@@ -101,9 +105,22 @@ class Agent():
 
         # get expected Q values from local model
         Q_expected  = self.qnetwork_local(states).gather(1,actions)
-
-        # compute loss
-        loss = F.mse_loss(Q_expected, Q_target)
+        
+        if USE_PRIORITIZED_REPLAY:
+            Q_target.sub_(Q_expected)
+            Q_target = torch.squeeze(Q_target)
+            Q_target.pow_(2)
+            with torch.no_grad():
+                TD_error = Q_target.detach()
+                TD_error.pow_(.5)
+                self.memory.update_priorities(TD_error)
+            
+            Q_target.mul_(w)
+            loss = Q_target.mean()
+        else:
+            # compute loss
+            loss = F.mse_loss(Q_expected, Q_target)
+            
         # minimize the loss
         self.optimizer.zero_grad()
         loss.backward()
@@ -169,4 +186,110 @@ class ReplayBuffer:
         """ return the current size of the internal memory. """
         return len(self.memory)
         
+class PrioritizedReplayBuffer:
+    """Fixed-size prioritized buffer to store experience tuples."""
+    
+    def __init__(self, action_size, buffer_size, batch_size, seed, device, alpha=0., beta=1., beta_scheduler=1.):
+        """ initialize a ReplayBuffer object.
         
+        Params
+        ======
+            action_size (int): dim of each action
+            buffer_size (int): maximum size of buffer
+            batch_size (int): size of each training batch
+            seed (int): random seed
+            alpha (float): prioritized lever alpha=0 -> uniform case
+            beta (float): level of importance-sampling corretion, beta=1 -> compensates for the non-uniform proba
+        """
+        self.action_size = action_size
+        self.memory = deque(maxlen=buffer_size)  
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.device = device
+        self.seed = random.seed(seed)
+        self.alpha = alpha
+        self.beta = beta
+        self.beta_scheduler = beta_scheduler
+        
+        # create memory
+        self.memory = np.empty(buffer_size, dtype=[
+            ("state", np.ndarray),
+            ("action", np.int),
+            ("reward", np.float),
+            ("next_state", np.ndarray),
+            ("done", np.bool),
+            ('prob', np.double)])
+        
+        self.memory_circular = 0
+        
+        self.memory_samples_indices = np.empty(self.batch_size)
+        self.memory_samples = np.empty(self.batch_size, dtype=type(self.memory))
+        
+        self.max_prob = 0.0001
+        self.nonzero_probability = 0.00001
+        
+        self.p = np.empty(self.buffer_size, dtype=np.double)
+        self.w = np.empty(self.buffer_size, dtype=np.double)
+        
+        
+    def add(self, state, action, reward, next_state, done):
+        """Add a new experience to memory."""
+        
+        # Add the experienced parameters to the memory
+        self.memory[self.memory_circular]['state'] = state
+        self.memory[self.memory_circular]['action'] = action
+        self.memory[self.memory_circular]['reward'] = reward
+        self.memory[self.memory_circular]['next_state'] = next_state
+        self.memory[self.memory_circular]['done'] = done
+        self.memory[self.memory_circular]['prob'] = self.max_prob
+        
+        # Control memory as a circular list
+        self.memory_circular = (self.memory_circular + 1) % self.buffer_size
+    
+    
+    def sample(self):
+        """Sample a batch of prioritized experiences from memory."""
+        
+        # Normalize the probability of being chosen for each one of the memory registers
+        np.divide(self.memory['prob'], self.memory['prob'].sum(), out=self.p)
+        # Choose "batch_size" sample index following the defined probability
+        self.memory_samples_indices = np.random.choice(self.buffer_size, self.batch_size, replace=False, p=self.p)
+        # Get the samples from memory
+        self.memory_samples = self.memory[self.memory_samples_indices]
+        
+        # Compute importance-sampling weights for each one of the memory registers
+        # w = ((N * P) ^ -β) / max(w)
+        np.multiply(self.memory['prob'], self.buffer_size, out=self.w)
+        np.power(self.w, -self.beta, out=self.w, where=self.w!=0) # condition to avoid division by zero
+        np.divide(self.w, self.w.max(), out=self.w) # normalize the weights
+        
+        self.beta = min(1, self.beta*self.beta_scheduler)
+        
+        # Split data into new variables
+        states = torch.from_numpy(np.vstack(self.memory_samples['state'])).float().to(self.device)
+        actions = torch.from_numpy(np.vstack(self.memory_samples['action'])).long().to(self.device)
+        rewards = torch.from_numpy(np.vstack(self.memory_samples['reward'])).float().to(self.device)
+        next_states = torch.from_numpy(np.vstack(self.memory_samples['next_state'])).float().to(self.device)
+        dones = torch.from_numpy(np.vstack(self.memory_samples['done']).astype(np.uint8)).float().to(self.device)
+        weights = torch.from_numpy(self.w[self.memory_samples_indices]).float().to(self.device)
+        
+        return (states, actions, rewards, next_states, dones, weights)
+    
+    def update_priorities(self, td_error):
+        # Balance the prioritization using the alpha value
+        td_error.pow_(self.alpha)
+
+        # Guarantee a non-zero probability
+        td_error.add_(self.nonzero_probability)
+        
+        # Update the probabilities in memory
+        self.memory_samples['prob'] = td_error
+        self.memory[self.memory_samples_indices] = self.memory_samples
+        
+        # Update the maximum probability value
+        self.max_prob = self.memory['prob'].max()
+        
+       
+    def __len__(self):
+        """Return the current size of internal memory."""
+        return self.buffer_size if self.memory_circular // self.buffer_size > 0 else self.memory_circular
