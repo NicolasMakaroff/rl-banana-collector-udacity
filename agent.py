@@ -15,6 +15,9 @@ TAU = 1e-3              # for soft update of target parameters
 LR = 5e-4               # learning rate 
 UPDATE_EVERY = 4        # how often to update the network
 
+USE_DOUBLE_DQN = True   # whether or not to use double dqn
+
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class Agent():
@@ -85,14 +88,20 @@ class Agent():
         
         states, actions, reward, next_states, dones = experiences
         
-        # get max predicted Q values (for next states) from target model
-        Q_target_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
-        # compute Q targets for current states
-        Q_target = reward + (gamma * Q_target_next * (1 - dones))
-        
+        with torch.no_grad():
+            if USE_DOUBLE_DQN :
+                Q_local_next = self.qnetwork_local(next_states).detach().max(1)[1].unsqueeze(1)
+                Q_target_next = self.qnetwork_target(next_states).gather(1,Q_local_next)
+                
+            else:                
+                # get max predicted Q values (for next states) from target model
+                Q_target_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
+            # compute Q targets for current states
+            Q_target = reward + (gamma * Q_target_next * (1 - dones))
+
         # get expected Q values from local model
         Q_expected  = self.qnetwork_local(states).gather(1,actions)
-        
+
         # compute loss
         loss = F.mse_loss(Q_expected, Q_target)
         # minimize the loss
