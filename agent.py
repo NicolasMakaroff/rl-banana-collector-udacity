@@ -3,6 +3,7 @@ import random
 from collections import namedtuple, deque
 
 from model import QNetwork
+from dueling_model import DuelingQNetwork
 
 import torch
 import torch.nn.functional as F
@@ -15,8 +16,9 @@ TAU = 1e-3              # for soft update of target parameters
 LR = 5e-4               # learning rate 
 UPDATE_EVERY = 4        # how often to update the network
 
-USE_DOUBLE_DQN = True   # whether or not to use double dqn
-USE_PRIORITIZED_REPLAY = True  # use prioritized experience replay
+USE_DOUBLE_DQN = False  # whether or not to use double dqn
+USE_PRIORITIZED_REPLAY = False  # use prioritized experience replay
+USE_DUELING_NETWORK = False
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -38,8 +40,12 @@ class Agent():
         self.seed = random.seed(seed)
         
         # define Q-Network
-        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
-        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
+        if USE_DUELING_NETWORK:
+            self.qnetwork_local = DuelingQNetwork(state_size, action_size, seed,128,32,64,32).to(device)
+            self.qnetwork_target = DuelingQNetwork(state_size, action_size, seed,128,32,64,32).to(device)
+        else:
+            self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
+            self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(),lr=LR)
         
         # Replay memory
@@ -90,8 +96,11 @@ class Agent():
             gamma (float): discount factor
         """
         
-        states, actions, reward, next_states, dones, w = experiences
-        
+        if USE_PRIORITIZED_REPLAY:
+            states, actions, reward, next_states, dones, w = experiences
+        else:
+            states, actions, reward, next_states, dones = experiences
+            
         with torch.no_grad():
             if USE_DOUBLE_DQN :
                 Q_local_next = self.qnetwork_local(next_states).detach().max(1)[1].unsqueeze(1)
